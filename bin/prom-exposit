@@ -1,0 +1,302 @@
+#!/usr/bin/env bash
+
+# Copyright (c) 2020 Wenhao Ji <predator.ray@gmail.com>
+
+# Permission is hereby granted, free of charge, to any person obtaining a copy of
+# this software and associated documentation files (the "Software"), to deal in
+# the Software without restriction, including without limitation the rights to
+# use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+# the Software, and to permit persons to whom the Software is furnished to do so,
+# subject to the following conditions:
+
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+# FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+# COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+# IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+# CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+set -euf -o pipefail
+
+# prom-exposit --type counter --name foobar --label a=b --value 0
+
+# https://stackoverflow.com/a/246128/1122665
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -h "$SOURCE" ]]; do
+    PROG_DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
+    SOURCE="$(readlink "$SOURCE")"
+    [[ $SOURCE != /* ]] && SOURCE="$PROG_DIR/$SOURCE"
+done
+PROG_DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
+PROG_NAME="${SOURCE##*/}"
+
+function usage() {
+    cat << EOF
+A command line tool to print Prometheus exposition format file.
+
+Usage:
+    ${PROG_NAME} --name METRIC_NAME --type METRIC_TYPE [ --comment COMMENT ] \\
+                 [ --label name=value ... ] [ --timestamp TIME ] --value METRIC_VALUE \\
+                 [ ... ]
+
+Example:
+    ${PROG_NAME} --name http_requests_total --type counter --comment 'The total number of HTTP requests.' \\
+        --label method=post --label code=200 --timestamp 1395066363000 --value 1027 \\
+        --label method=post --label code=400 --timestamp 1395066363000 --value 3 \\
+        --name metric_without_timestamp_and_labels --value 12.47
+
+    Outputs:
+    # HELP http_requests_total The total number of HTTP requests.
+    # TYPE http_requests_total counter
+    http_requests_total{method="post",code="200",} 1027 1395066363000
+    http_requests_total{method="post",code="200",method="post",code="400",} 3 1395066363000
+    # HELP metric_without_timestamp_and_labels 
+    # TYPE metric_without_timestamp_and_labels UNTYPED
+    metric_without_timestamp_and_labels 12.47
+
+    ${PROG_NAME} --name http_request_duration_seconds --type histogram --comment 'A histogram of the request duration.' \\
+        --le 0.05 --count 24054 \\
+        --le 0.5 --count 129389 \\
+        --total-count 144320 \\
+        --value 53423
+
+    Outputs:
+    # HELP http_request_duration_seconds A histogram of the request duration.
+    # TYPE http_request_duration_seconds histogram
+    http_request_duration_seconds_bucket{le="0.05",} 24054
+    http_request_duration_seconds_bucket{le="0.5",} 129389
+    http_request_duration_seconds_bucket{le="+Inf",} 144320
+    http_request_duration_seconds_sum 53423
+    http_request_duration_seconds_count 144320
+EOF
+}
+
+function main() {
+    local opts
+    opts=$(getopt -o ht:n:l:v:t:c: \
+        --long help,type:,name:,label:,value:,timestamp:,comment:,le:,count:,total-count: -- "$@")
+    eval set -- ${opts}
+
+    local exposition_tmp_file
+    exposition_tmp_file="$(mktemp)"
+    trap "rm -rf ${exposition_tmp_file}" EXIT
+
+    local metric_type=''
+    local metric_name=''
+    local metric_comment=''
+    local metric_timestamp=''
+    local metric_labels=()
+
+    local prev_metric_name=''
+
+    local histogram_le=''
+    local histogram_total_count=''
+    local histogram_buckets=()
+
+    while [[ $# -gt 0 ]]; do
+        local opt="$1"
+        case "${opt}" in
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            -t|--type)
+                shift
+                metric_type="$1"
+                metric_timestamp=''
+                metric_labels=()
+                ;;
+            -n|--name)
+                shift
+                metric_name="$1"
+                metric_timestamp=''
+                metric_labels=()
+                ;;
+            -c|--comment)
+                shift
+                metric_comment="$1"
+                metric_timestamp=''
+                metric_labels=()
+                ;;
+            -l|--label)
+                shift
+                metric_labels+=("$1")
+                metric_timestamp=''
+                ;;
+            -t|--timestamp)
+                shift
+                metric_timestamp="$1"
+                ;;
+            --le)
+                shift
+                if [[ -z "${metric_type:-}" ]]; then
+                    metric_type='histogram'
+                elif [[ "${metric_type:-}" != 'histogram' ]]; then
+                    echo >&2 "The metric type must be histogram when using the '--le' option."
+                    exit 1
+                fi
+                histogram_le="$1"
+                ;;
+            --count)
+                shift
+                if [[ -z "${metric_type:-}" ]]; then
+                    metric_type='histogram'
+                elif [[ "${metric_type:-}" != 'histogram' ]]; then
+                    echo >&2 "The metric type must be histogram when using the '--count' option."
+                    exit 1
+                fi
+                if [[ -z "${histogram_le:-}" ]]; then
+                    echo >&2 "The '--le' option must be used prior to the '--count' option."
+                    exit 1
+                fi
+                local histogram_count="$1"
+                histogram_buckets+=("${histogram_le}=${histogram_count}")
+                histogram_le=''
+                ;;
+            --total-count)
+                shift
+                if [[ -z "${metric_type:-}" ]]; then
+                    metric_type='histogram'
+                elif [[ "${metric_type:-}" != 'histogram' ]]; then
+                    echo >&2 "The metric type must be histogram when using the '--total-count' option."
+                    exit 1
+                fi
+                histogram_total_count="$1"
+                histogram_buckets+=("+Inf=${histogram_total_count}")
+                ;;
+            -v|--value)
+                shift
+                local metric_value="$1"
+                if [[ -z "${metric_name:-}" ]]; then
+                    echo >&2 "The metric name is missing."
+                    exit 1
+                fi
+
+                # print comment
+                if [[ "${prev_metric_name}" != "${metric_name}" ]]; then
+                    echo "# HELP ${metric_name} ${metric_comment:-}" >> "${exposition_tmp_file}"
+                    echo "# TYPE ${metric_name} ${metric_type:-UNTYPED}" >> "${exposition_tmp_file}"
+                fi
+
+                if [[ "${metric_type:-}" == 'histogram' ]]; then
+                    if [[ -z "${histogram_total_count:-}" ]]; then
+                        echo >&2 "The '--total-count' is not set."
+                        exit 1
+                    fi
+                    # buckets
+                    for histogram_bucket in "${histogram_buckets[@]}"; do
+                        local histogram_bucket_le="${histogram_bucket%%=*}"
+                        local histogram_bucket_count="${histogram_bucket#*=}"
+
+                        local series_line="${metric_name}_bucket"
+                        series_line="${series_line}{"
+                        if [[ "${#metric_labels[@]}" -gt 0 ]]; then
+                            for metric_label in "${metric_labels[@]}"; do
+                                local label_name="${metric_label%%=*}"
+                                local label_value="${metric_label#*=}"
+                                label_value="${label_value//\\/\\\\}" # escape \
+                                label_value="${label_value//\"/\\\"}" # escape "
+                                label_value="${label_value//$'\n'/\\n}" # escape newline
+                                series_line="${series_line}${label_name}=\"${label_value}\","
+                            done
+                        fi
+                        series_line="${series_line}le=\"${histogram_bucket_le}\","
+                        series_line="${series_line}}"
+                        series_line="${series_line} ${histogram_bucket_count}"
+
+                        if [[ -n "${metric_timestamp:-}" ]]; then
+                            series_line="${series_line} ${metric_timestamp}"
+                        fi
+                        echo "${series_line}" >> "${exposition_tmp_file}"
+                    done
+
+                    # sum
+                    local series_line="${metric_name}_sum"
+                    if [[ "${#metric_labels[@]}" -gt 0 ]]; then
+                        series_line="${series_line}{"
+                        for metric_label in "${metric_labels[@]}"; do
+                            local label_name="${metric_label%%=*}"
+                            local label_value="${metric_label#*=}"
+                            label_value="${label_value//\\/\\\\}" # escape \
+                            label_value="${label_value//\"/\\\"}" # escape "
+                            label_value="${label_value//$'\n'/\\n}" # escape newline
+                            series_line="${series_line}${label_name}=\"${label_value}\","
+                        done
+                        series_line="${series_line}}"
+                    fi
+                    series_line="${series_line} ${metric_value}"
+                    if [[ -n "${metric_timestamp:-}" ]]; then
+                        series_line="${series_line} ${metric_timestamp}"
+                    fi
+                    echo "${series_line}" >> "${exposition_tmp_file}"
+
+                    # count
+                    local series_line="${metric_name}_count"
+                    if [[ "${#metric_labels[@]}" -gt 0 ]]; then
+                        series_line="${series_line}{"
+                        for metric_label in "${metric_labels[@]}"; do
+                            local label_name="${metric_label%%=*}"
+                            local label_value="${metric_label#*=}"
+                            label_value="${label_value//\\/\\\\}" # escape \
+                            label_value="${label_value//\"/\\\"}" # escape "
+                            label_value="${label_value//$'\n'/\\n}" # escape newline
+                            series_line="${series_line}${label_name}=\"${label_value}\","
+                        done
+                        series_line="${series_line}}"
+                    fi
+                    series_line="${series_line} ${histogram_total_count}"
+                    if [[ -n "${metric_timestamp:-}" ]]; then
+                        series_line="${series_line} ${metric_timestamp}"
+                    fi
+                    echo "${series_line}" >> "${exposition_tmp_file}"
+                else
+                    local series_line="${metric_name}"
+                    if [[ "${#metric_labels[@]}" -gt 0 ]]; then
+                        series_line="${series_line}{"
+                        for metric_label in "${metric_labels[@]}"; do
+                            local label_name="${metric_label%%=*}"
+                            local label_value="${metric_label#*=}"
+                            label_value="${label_value//\\/\\\\}" # escape \
+                            label_value="${label_value//\"/\\\"}" # escape "
+                            label_value="${label_value//$'\n'/\\n}" # escape newline
+                            series_line="${series_line}${label_name}=\"${label_value}\","
+                        done
+                        series_line="${series_line}}"
+                    fi
+                    series_line="${series_line} ${metric_value}"
+
+                    if [[ -n "${metric_timestamp:-}" ]]; then
+                        series_line="${series_line} ${metric_timestamp}"
+                    fi
+                    echo "${series_line}" >> "${exposition_tmp_file}"
+                fi
+
+                prev_metric_name="${metric_name}"
+                metric_timestamp=''
+                metric_comment=''
+                metric_type=''
+
+                ;;
+            --)
+                shift
+                break
+                ;;
+            *)
+                break
+                ;;
+        esac
+        shift
+    done
+
+    if [[ "$#" -gt 0 ]]; then
+        usage
+        exit 1
+    fi
+
+    cat "${exposition_tmp_file}"
+}
+
+main "$@"
