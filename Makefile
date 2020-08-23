@@ -1,5 +1,5 @@
 NAME=prom-exposit
-GIT_TAG := $(shell git describe --tags --abbrev=0)
+GIT_TAG := $(shell git describe --tags --abbrev=0 2>/dev/null || echo 'unversioned')
 GIT_COMMIT_ID := $(shell git rev-parse HEAD)
 VERSION := $(GIT_TAG:v%=%)
 
@@ -27,7 +27,7 @@ build: $(RELEASE_FILE_PATH)
 version: $(VERSION_FILE_PATH)
 
 test:
-	echo unimplemented
+	echo no test
 
 checksum: $(CHECKSUM_FILE_PATH)
 

@@ -21,8 +21,6 @@
 
 set -euf -o pipefail
 
-# prom-exposit --type counter --name foobar --label a=b --value 0
-
 # https://stackoverflow.com/a/246128/1122665
 SOURCE="${BASH_SOURCE[0]}"
 while [[ -h "$SOURCE" ]]; do
