@@ -17,8 +17,8 @@ The output will be
 # HELP http_requests_total The total number of HTTP requests.
 # TYPE http_requests_total counter
 http_requests_total{method="post",code="200",} 1027 1395066363000
-http_requests_total{method="post",code="200",method="post",code="400",} 3 1395066363000
-# HELP metric_without_timestamp_and_labels 
+http_requests_total{method="post",code="400",} 3 1395066363000
+# HELP metric_without_timestamp_and_labels
 # TYPE metric_without_timestamp_and_labels UNTYPED
 metric_without_timestamp_and_labels 12.47
 ```

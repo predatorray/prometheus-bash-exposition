@@ -21,6 +21,13 @@
 
 set -euf -o pipefail
 
+# check bash minimum version requirement
+readonly BASH_MAJOR_VERSION="${BASH_VERSION%%.*}"
+if [[ -z "${BASH_MAJOR_VERSION:-}" ]] || [[ "${BASH_MAJOR_VERSION}" -le 3 ]]; then
+    echo >&2 "This script requires Bash version >= 4. (but found: ${BASH_VERSION})"
+    exit 1
+fi
+
 # https://stackoverflow.com/a/246128/1122665
 SOURCE="${BASH_SOURCE[0]}"
 while [[ -h "$SOURCE" ]]; do
@@ -30,6 +37,26 @@ while [[ -h "$SOURCE" ]]; do
 done
 PROG_DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
 PROG_NAME="${SOURCE##*/}"
+
+function use_gnu_getopt() {
+    if [[ -n "${GNU_GETOPT_PREFIX:-}" ]]; then
+        hash -p "${GNU_GETOPT_PREFIX}/bin/getopt" getopt
+        return
+    fi
+
+    while IFS='' read getopt_on_path; do
+        local getopt_test=0
+        "${getopt_on_path}" -T 2>&1 >/dev/null || getopt_test="$?"
+        if [[ "${getopt_test}" -eq 4 ]]; then
+            hash -p "${getopt_on_path}" getopt
+            return
+        fi
+    done < <(which -a getopt 2>/dev/null)
+
+    echo >&2 'No GNU getopt is found on PATH.'
+    echo >&2 'Please install gnu-getopt and either add it your PATH or set GNU_GETOPT_PREFIX env variable to its installed location.'
+    exit 4
+}
 
 function usage() {
     cat << EOF
@@ -50,8 +77,8 @@ Example:
     # HELP http_requests_total The total number of HTTP requests.
     # TYPE http_requests_total counter
     http_requests_total{method="post",code="200",} 1027 1395066363000
-    http_requests_total{method="post",code="200",method="post",code="400",} 3 1395066363000
-    # HELP metric_without_timestamp_and_labels 
+    http_requests_total{method="post",code="400",} 3 1395066363000
+    # HELP metric_without_timestamp_and_labels
     # TYPE metric_without_timestamp_and_labels UNTYPED
     metric_without_timestamp_and_labels 12.47
 
@@ -73,6 +100,8 @@ EOF
 }
 
 function main() {
+    use_gnu_getopt
+
     local opts
     opts=$(getopt -o ht:n:l:v:t:c: \
         --long help,type:,name:,label:,value:,timestamp:,comment:,le:,count:,total-count: -- "$@")
@@ -86,7 +115,7 @@ function main() {
     local metric_name=''
     local metric_comment=''
     local metric_timestamp=''
-    local metric_labels=()
+    declare -A metric_labels
 
     local prev_metric_name=''
 
@@ -121,7 +150,10 @@ function main() {
                 ;;
             -l|--label)
                 shift
-                metric_labels+=("$1")
+                local metric_label="$1"
+                local label_name="${metric_label%%=*}"
+                local label_value="${metric_label#*=}"
+                metric_labels[${label_name}]="${label_value}"
                 metric_timestamp=''
                 ;;
             -t|--timestamp)
@@ -192,9 +224,8 @@ function main() {
                         local series_line="${metric_name}_bucket"
                         series_line="${series_line}{"
                         if [[ "${#metric_labels[@]}" -gt 0 ]]; then
-                            for metric_label in "${metric_labels[@]}"; do
-                                local label_name="${metric_label%%=*}"
-                                local label_value="${metric_label#*=}"
+                            for label_name in "${!metric_labels[@]}"; do
+                                local label_value="${metric_labels[${label_name}]}"
                                 label_value="${label_value//\\/\\\\}" # escape \
                                 label_value="${label_value//\"/\\\"}" # escape "
                                 label_value="${label_value//$'\n'/\\n}" # escape newline
@@ -215,9 +246,8 @@ function main() {
                     local series_line="${metric_name}_sum"
                     if [[ "${#metric_labels[@]}" -gt 0 ]]; then
                         series_line="${series_line}{"
-                        for metric_label in "${metric_labels[@]}"; do
-                            local label_name="${metric_label%%=*}"
-                            local label_value="${metric_label#*=}"
+                        for label_name in "${!metric_labels[@]}"; do
+                            local label_value="${metric_labels[${label_name}]}"
                             label_value="${label_value//\\/\\\\}" # escape \
                             label_value="${label_value//\"/\\\"}" # escape "
                             label_value="${label_value//$'\n'/\\n}" # escape newline
@@ -235,9 +265,8 @@ function main() {
                     local series_line="${metric_name}_count"
                     if [[ "${#metric_labels[@]}" -gt 0 ]]; then
                         series_line="${series_line}{"
-                        for metric_label in "${metric_labels[@]}"; do
-                            local label_name="${metric_label%%=*}"
-                            local label_value="${metric_label#*=}"
+                        for label_name in "${!metric_labels[@]}"; do
+                            local label_value="${metric_labels[${label_name}]}"
                             label_value="${label_value//\\/\\\\}" # escape \
                             label_value="${label_value//\"/\\\"}" # escape "
                             label_value="${label_value//$'\n'/\\n}" # escape newline
@@ -254,9 +283,8 @@ function main() {
                     local series_line="${metric_name}"
                     if [[ "${#metric_labels[@]}" -gt 0 ]]; then
                         series_line="${series_line}{"
-                        for metric_label in "${metric_labels[@]}"; do
-                            local label_name="${metric_label%%=*}"
-                            local label_value="${metric_label#*=}"
+                        for label_name in "${!metric_labels[@]}"; do
+                            local label_value="${metric_labels[${label_name}]}"
                             label_value="${label_value//\\/\\\\}" # escape \
                             label_value="${label_value//\"/\\\"}" # escape "
                             label_value="${label_value//$'\n'/\\n}" # escape newline
